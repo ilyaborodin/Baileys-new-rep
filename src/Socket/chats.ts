@@ -462,6 +462,12 @@ export const makeChatsSocket = (config: SocketConfig) => {
 			const globalMutationMap: ChatMutationMap = {}
 
 			await authState.keys.transaction(async () => {
+				// Create a transaction-aware version of getAppStateSyncKey
+				const getAppStateSyncKeyInTransaction = async (keyId: string) => {
+					const { [keyId]: key } = await authState.keys.get('app-state-sync-key', [keyId])
+					return key
+				}
+
 				const collectionsToHandle = new Set<string>(collections)
 				// in case something goes wrong -- ensure we don't enter a loop that cannot be exited from
 				const attemptsMap: { [T in WAPatchName]?: number } = {}
@@ -525,7 +531,7 @@ export const makeChatsSocket = (config: SocketConfig) => {
 								const { state: newState, mutationMap } = await decodeSyncdSnapshot(
 									name,
 									snapshot,
-									getAppStateSyncKey,
+									getAppStateSyncKeyInTransaction,
 									initialVersionMap[name],
 									appStateMacVerification.snapshot
 								)
@@ -543,7 +549,7 @@ export const makeChatsSocket = (config: SocketConfig) => {
 									name,
 									patches,
 									states[name],
-									getAppStateSyncKey,
+									getAppStateSyncKeyInTransaction,
 									config.options,
 									initialVersionMap[name],
 									logger,
@@ -749,6 +755,12 @@ export const makeChatsSocket = (config: SocketConfig) => {
 
 		await processingMutex.mutex(async () => {
 			await authState.keys.transaction(async () => {
+				// Create a transaction-aware version of getAppStateSyncKey
+				const getAppStateSyncKeyInTransaction = async (keyId: string) => {
+					const { [keyId]: key } = await authState.keys.get('app-state-sync-key', [keyId])
+					return key
+				}
+
 				logger.debug({ patch: patchCreate }, 'applying app patch')
 
 				await resyncAppState([name], false)
@@ -756,7 +768,7 @@ export const makeChatsSocket = (config: SocketConfig) => {
 				const { [name]: currentSyncVersion } = await authState.keys.get('app-state-sync-version', [name])
 				initial = currentSyncVersion || newLTHashState()
 
-				encodeResult = await encodeSyncdPatch(patchCreate, myAppStateKeyId, initial, getAppStateSyncKey)
+				encodeResult = await encodeSyncdPatch(patchCreate, myAppStateKeyId, initial, getAppStateSyncKeyInTransaction)
 				const { patch, state } = encodeResult
 
 				const node: BinaryNode = {
