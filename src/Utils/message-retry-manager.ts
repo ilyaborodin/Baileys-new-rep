@@ -45,12 +45,12 @@ export class MessageRetryManager {
 	})
 	private sessionRecreateHistory = new LRUCache<string, number>({
 		ttl: RECREATE_SESSION_TIMEOUT * 2,
-		ttlAutopurge: true
+		ttlAutopurge: false
 	})
 	private retryCounters = new LRUCache<string, number>({
 		ttl: 15 * 60 * 1000,
-		ttlAutopurge: true,
-		updateAgeOnGet: true
+		ttlAutopurge: false,
+		updateAgeOnGet: false
 	}) // 15 minutes TTL
 	private pendingPhoneRequests: PendingPhoneRequest = {}
 	private readonly maxMsgRetryCount: number = 5
