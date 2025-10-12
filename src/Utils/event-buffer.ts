@@ -75,8 +75,8 @@ export const makeEventBuffer = (logger: ILogger): BaileysBufferableEventEmitter 
 	let isBuffering = false
 	let bufferTimeout: NodeJS.Timeout | null = null
 	let bufferCount = 0
-	const MAX_HISTORY_CACHE_SIZE = 10000 // Limit the history cache size to prevent memory bloat
-	const BUFFER_TIMEOUT_MS = 30000 // 30 seconds
+	const MAX_HISTORY_CACHE_SIZE = 1000 // Limit the history cache size to prevent memory bloat
+	const BUFFER_TIMEOUT_MS = 5000 // 30 seconds
 
 	// take the generic event and fire it as a baileys event
 	ev.on('event', (map: BaileysEventData) => {
