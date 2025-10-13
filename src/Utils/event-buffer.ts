@@ -112,7 +112,33 @@ export const makeEventBuffer = (logger: ILogger): BaileysBufferableEventEmitter 
 			return false
 		}
 
-		logger.debug({ bufferCount }, 'Flushing event buffer')
+		const loggerLevel = logger.level
+		const shouldLog = loggerLevel === 'trace' || loggerLevel === 'debug'
+		
+		if (shouldLog) {
+			const eventCounts = {
+				messageUpserts: Object.keys(data.messageUpserts).length,
+				chatUpserts: Object.keys(data.chatUpserts).length,
+				messageUpdates: Object.keys(data.messageUpdates).length,
+				chatUpdates: Object.keys(data.chatUpdates).length,
+				messageReactions: Object.keys(data.messageReactions).length,
+				messageReceipts: Object.keys(data.messageReceipts).length,
+				messageDeletes: Object.keys(data.messageDeletes).length,
+				contactUpserts: Object.keys(data.contactUpserts).length,
+				contactUpdates: Object.keys(data.contactUpdates).length,
+				groupUpdates: Object.keys(data.groupUpdates).length
+			}
+			
+			const totalEvents = Object.values(eventCounts).reduce((sum, count) => sum + count, 0)
+			
+			logger.warn({
+				bufferCount,
+				totalEvents,
+				eventCounts,
+				historyCacheSize: historyCache.size
+			}, 'Flushing event buffer')
+		}
+		
 		isBuffering = false
 		bufferCount = 0
 
