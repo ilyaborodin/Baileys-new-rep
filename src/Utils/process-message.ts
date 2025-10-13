@@ -240,6 +240,17 @@ const processMessage = async (
 
 					const data = await downloadAndProcessHistorySyncNotification(histNotification, options)
 
+					if (data.privacyTokens?.length) {
+						const updates: { [jid: string]: Buffer } = {}
+						/*eslint-disable max-depth*/
+						for (const item of data.privacyTokens) {
+							updates[item.jid] = item.token
+						}
+
+						await keyStore.set({ 'privacy-token': updates })
+						logger?.info({ count: data.privacyTokens.length }, 'stored privacy tokens from history sync')
+					}
+
 					ev.emit('messaging-history.set', {
 						...data,
 						isLatest: histNotification.syncType !== proto.HistorySync.HistorySyncType.ON_DEMAND ? isLatest : undefined,
@@ -297,7 +308,7 @@ const processMessage = async (
 					const { peerDataOperationResult } = response
 					for (const result of peerDataOperationResult!) {
 						const { placeholderMessageResendResponse: retryResponse } = result
-						//eslint-disable-next-line max-depth
+
 						if (retryResponse) {
 							const webMessageInfo = proto.WebMessageInfo.decode(retryResponse.webMessageInfoBytes!)
 							// wait till another upsert event is available, don't want it to be part of the PDO response message
