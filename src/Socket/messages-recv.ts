@@ -434,7 +434,7 @@ export const makeMessagesRecvSocket = (config: SocketConfig) => {
 				recreateReason = result.reason
 
 				if (shouldRecreateSession) {
-					logger.info({ fromJid, retryCount, reason: recreateReason }, 'recreating session for retry')
+					logger.debug({ fromJid, retryCount, reason: recreateReason }, 'recreating session for retry')
 					// Delete existing session to force recreation
 					await authState.keys.set({ session: { [sessionId]: null } })
 					forceIncludeKeys = true
@@ -698,16 +698,45 @@ export const makeMessagesRecvSocket = (config: SocketConfig) => {
 		switch (nodeType) {
 			case 'privacy_token':
 				const tokenList = getBinaryNodeChildren(child, 'token')
+				const updateMap = new Map<string, Uint8Array>()
 				for (const { attrs, content } of tokenList) {
-					const jid = attrs.jid
-					ev.emit('chats.update', [
-						{
-							id: jid,
-							tcToken: content as Buffer
-						}
-					])
+					const possibleJids = new Set<string>()
+					if (attrs.jid) {
+						possibleJids.add(jidNormalizedUser(attrs.jid))
+					}
 
-					logger.debug({ jid }, 'got privacy token update')
+					if (attrs.lid) {
+						possibleJids.add(jidNormalizedUser(attrs.lid))
+					}
+
+					if (attrs.pn) {
+						possibleJids.add(jidNormalizedUser(attrs.pn))
+					}
+
+					if (!possibleJids.size && attrs.jid) {
+						possibleJids.add(jidNormalizedUser(attrs.jid))
+					}
+
+					for (const targetJid of possibleJids) {
+						const tokenBytes = content as Uint8Array
+						updateMap.set(targetJid, tokenBytes)
+						logger.debug({ jid: targetJid }, 'got privacy token update')
+					}
+				}
+
+				if (updateMap.size) {
+					const chatUpdates: { id: string; tcToken: Uint8Array }[] = []
+					const updates: { jid: string; token: Uint8Array }[] = []
+					for (const [jid, token] of updateMap.entries()) {
+						chatUpdates.push({ id: jid, tcToken: token })
+						updates.push({ jid, token })
+					}
+
+					ev.emit('chats.update', chatUpdates)
+
+					if (config.storePrivacyTokens) {
+						await config.storePrivacyTokens(updates)
+					}
 				}
 
 				break
@@ -964,7 +993,7 @@ export const makeMessagesRecvSocket = (config: SocketConfig) => {
 				recreateReason = result.reason
 
 				if (shouldRecreateSession) {
-					logger.info({ participant, retryCount, reason: recreateReason }, 'recreating session for outgoing retry')
+					logger.debug({ participant, retryCount, reason: recreateReason }, 'recreating session for outgoing retry')
 					await authState.keys.set({ session: { [sessionId]: null } })
 				}
 			} catch (error) {
