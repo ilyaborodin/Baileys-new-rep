@@ -38,6 +38,7 @@ export const PROCESSABLE_HISTORY_TYPES = [
 	proto.Message.HistorySyncNotification.HistorySyncType.PUSH_NAME,
 	proto.Message.HistorySyncNotification.HistorySyncType.RECENT,
 	proto.Message.HistorySyncNotification.HistorySyncType.FULL,
+	proto.Message.HistorySyncNotification.HistorySyncType.NON_BLOCKING_DATA, 
 	proto.Message.HistorySyncNotification.HistorySyncType.ON_DEMAND
 ]
 
