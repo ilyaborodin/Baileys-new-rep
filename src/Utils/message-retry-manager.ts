@@ -44,13 +44,16 @@ export class MessageRetryManager {
 		max: RECENT_MESSAGES_SIZE
 	})
 	private sessionRecreateHistory = new LRUCache<string, number>({
-		ttl: RECREATE_SESSION_TIMEOUT * 2,
-		ttlAutopurge: true
+		max: 500,               // Very safe limit: ~200KB per connection (20x increase)
+		ttl: RECREATE_SESSION_TIMEOUT * 2, // 2 hours
+		ttlAutopurge: false,
+		updateAgeOnGet: false,
 	})
 	private retryCounters = new LRUCache<string, number>({
-		ttl: 15 * 60 * 1000,
-		ttlAutopurge: true,
-		updateAgeOnGet: true
+		max: 500,              // Very safe limit: ~1MB per connection (20x increase)
+		ttl: 15 * 60 * 1000, // 15 minutes
+		ttlAutopurge: false,
+		updateAgeOnGet: false,
 	}) // 15 minutes TTL
 	private pendingPhoneRequests: PendingPhoneRequest = {}
 	private readonly maxMsgRetryCount: number = 5

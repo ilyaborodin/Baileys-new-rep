@@ -288,9 +288,10 @@ export const addTransactionCapability = (
 
 	// LRU Cache to hold mutexes for different key types
 	const mutexCache = new LRUCache<string, Mutex>({
-		ttl: 60 * 60 * 1000, // 1 hour
-		ttlAutopurge: true,
-		updateAgeOnGet: true
+		max: 500,
+		ttl: 60 * 60 * 1000,     // 1 hour
+		ttlAutopurge: false,
+		updateAgeOnGet: false
 	})
 
 	let transactionsInProgress = 0
