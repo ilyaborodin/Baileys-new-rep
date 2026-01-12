@@ -52,20 +52,35 @@ export function makeCacheableSignalKeyStore(
 		return `${type}.${id}`
 	}
 
-	async function cacheGet<T extends keyof SignalDataTypeMap>(type: T, ids: string[]) {
+	type CacheValue = SignalDataTypeMap[keyof SignalDataTypeMap]
+
+	async function cacheGet<T extends keyof SignalDataTypeMap>(
+		type: T,
+		ids: string[]
+	): Promise<Record<string, SignalDataTypeMap[T] | undefined>> {
 		const keys = ids.map(id => getUniqueId(type, id))
 		if (cache.mget) {
-			return cache.mget(keys) as Promise<Record<string, SignalDataTypeMap[T] | undefined>>
+			return cache.mget<SignalDataTypeMap[T]>(keys)
 		}
+
 		const results: Record<string, SignalDataTypeMap[T] | undefined> = {}
 		for (const key of keys) {
 			results[key] = (await cache.get(key)) as SignalDataTypeMap[T] | undefined
 		}
+
 		return results
 	}
 
-	async function cacheSet<T extends keyof SignalDataTypeMap>(type: T, id: string, value: SignalDataTypeMap[T]) {
-		await cache.set(getUniqueId(type, id), value as SignalDataTypeMap[keyof SignalDataTypeMap])
+	async function cacheMset(entries: Array<{ key: string; value: CacheValue }>): Promise<void> {
+		if (entries.length === 0) return
+
+		if (cache.mset) {
+			await cache.mset(entries)
+		} else {
+			for (const { key, value } of entries) {
+				await cache.set(key, value)
+			}
+		}
 	}
 
 	return {
@@ -88,29 +103,34 @@ export function makeCacheableSignalKeyStore(
 				logger?.trace({ items: idsToFetch.length }, 'loading from store')
 				const fetched = await store.get(type, idsToFetch)
 
+				const toCache: Array<{ key: string; value: CacheValue }> = []
 				for (const id of idsToFetch) {
 					const item = fetched[id]
 					if (item) {
 						data[id] = item
-						await cacheSet(type, id, item)
+						toCache.push({ key: getUniqueId(type, id), value: item })
 					}
 				}
+
+				await cacheMset(toCache)
 			}
 
 			return data
 		},
 		async set(data) {
-			// Batch all cache updates
-			let keys = 0
+			const allEntries: Array<{ key: string; value: CacheValue }> = []
 
 			for (const type in data) {
-				for (const id in data[type as keyof SignalDataTypeMap]) {
-					await cache.set(getUniqueId(type, id), data[type as keyof SignalDataTypeMap]![id]!)
-					keys += 1
+				const typeData = data[type as keyof SignalDataTypeMap]
+				if (!typeData) continue
+
+				for (const [id, value] of Object.entries(typeData)) {
+					allEntries.push({ key: getUniqueId(type, id), value })
 				}
 			}
 
-			logger?.trace({ keys }, 'updated cache')
+			await cacheMset(allEntries)
+			logger?.trace({ keys: allEntries.length }, 'updated cache')
 			await store.set(data)
 		},
 		async clear() {
