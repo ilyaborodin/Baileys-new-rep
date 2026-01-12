@@ -5,7 +5,7 @@ import { randomBytes } from 'crypto'
 import { DEFAULT_CACHE_TTLS } from '../Defaults'
 import type {
 	AuthenticationCreds,
-	CacheStore,
+	PossiblyExtendedCacheStore,
 	SignalDataSet,
 	SignalDataTypeMap,
 	SignalKeyStore,
@@ -35,7 +35,7 @@ interface TransactionContext {
 export function makeCacheableSignalKeyStore(
 	store: SignalKeyStore,
 	logger?: ILogger,
-	_cache?: CacheStore
+	_cache?: PossiblyExtendedCacheStore
 ): SignalKeyStore {
 	const cache =
 		_cache ||
@@ -52,22 +52,33 @@ export function makeCacheableSignalKeyStore(
 		return `${type}.${id}`
 	}
 
+	async function cacheGet<T extends keyof SignalDataTypeMap>(type: T, ids: string[]) {
+		const keys = ids.map(id => getUniqueId(type, id))
+		if (cache.mget) {
+			return cache.mget(keys) as Promise<Record<string, SignalDataTypeMap[T] | undefined>>
+		}
+		const results: Record<string, SignalDataTypeMap[T] | undefined> = {}
+		for (const key of keys) {
+			results[key] = (await cache.get(key)) as SignalDataTypeMap[T] | undefined
+		}
+		return results
+	}
+
+	async function cacheSet<T extends keyof SignalDataTypeMap>(type: T, id: string, value: SignalDataTypeMap[T]) {
+		await cache.set(getUniqueId(type, id), value as SignalDataTypeMap[keyof SignalDataTypeMap])
+	}
+
 	return {
 		async get(type, ids) {
 			const data: { [_: string]: SignalDataTypeMap[typeof type] } = {}
 			const idsToFetch: string[] = []
 
-			// Batch cache lookups with Promise.all for better performance
-			const cacheResults = await Promise.all(
-				ids.map(async id => ({
-					id,
-					item: await cache.get<SignalDataTypeMap[typeof type]>(getUniqueId(type, id))
-				}))
-			)
+			const cacheResults = await cacheGet(type, ids)
 
-			for (const { id, item } of cacheResults) {
-				if (typeof item !== 'undefined') {
-					data[id] = item as SignalDataTypeMap[typeof type]
+			for (const id of ids) {
+				const item = cacheResults[getUniqueId(type, id)]
+				if (item !== undefined) {
+					data[id] = item
 				} else {
 					idsToFetch.push(id)
 				}
@@ -77,12 +88,11 @@ export function makeCacheableSignalKeyStore(
 				logger?.trace({ items: idsToFetch.length }, 'loading from store')
 				const fetched = await store.get(type, idsToFetch)
 
-				// Update cache for fetched items
 				for (const id of idsToFetch) {
 					const item = fetched[id]
 					if (item) {
 						data[id] = item
-						await cache.set(getUniqueId(type, id), item as SignalDataTypeMap[keyof SignalDataTypeMap])
+						await cacheSet(type, id, item)
 					}
 				}
 			}

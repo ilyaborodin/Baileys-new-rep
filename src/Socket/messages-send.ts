@@ -535,6 +535,8 @@ export const makeMessagesSocket = (config: SocketConfig) => {
 			: recipientJids.map(jid => ({ recipientJid: jid, message: patched }))
 
 		// Cache encoded bytes for identical message objects (common in groups)
+		// WeakMap uses object identity - this works because `patched` is the same
+		// object reference reused for all recipients when sending to a group
 		const encodedCache = new WeakMap<proto.IMessage, Buffer>()
 		const getEncodedBytes = (msg: proto.IMessage): Buffer => {
 			let cached = encodedCache.get(msg)
