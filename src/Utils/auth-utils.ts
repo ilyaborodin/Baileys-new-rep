@@ -2,11 +2,10 @@ import NodeCache from '@cacheable/node-cache'
 import { AsyncLocalStorage } from 'async_hooks'
 import { Mutex } from 'async-mutex'
 import { randomBytes } from 'crypto'
-import PQueue from 'p-queue'
 import { DEFAULT_CACHE_TTLS } from '../Defaults'
 import type {
 	AuthenticationCreds,
-	CacheStore,
+	PossiblyExtendedCacheStore,
 	SignalDataSet,
 	SignalDataTypeMap,
 	SignalKeyStore,
@@ -36,7 +35,7 @@ interface TransactionContext {
 export function makeCacheableSignalKeyStore(
 	store: SignalKeyStore,
 	logger?: ILogger,
-	_cache?: CacheStore
+	_cache?: PossiblyExtendedCacheStore
 ): SignalKeyStore {
 	const cache =
 		_cache ||
@@ -46,56 +45,93 @@ export function makeCacheableSignalKeyStore(
 			deleteOnExpire: true
 		})
 
-	// Mutex for protecting cache operations
-	const cacheMutex = new Mutex()
+	// No mutex needed - NodeCache operations are safe in Node.js single-threaded model
+	// and the underlying store has its own concurrency control
 
 	function getUniqueId(type: string, id: string) {
 		return `${type}.${id}`
 	}
 
+	type CacheValue = SignalDataTypeMap[keyof SignalDataTypeMap]
+
+	async function cacheGet<T extends keyof SignalDataTypeMap>(
+		type: T,
+		ids: string[]
+	): Promise<Record<string, SignalDataTypeMap[T] | undefined>> {
+		const keys = ids.map(id => getUniqueId(type, id))
+		if (cache.mget) {
+			return cache.mget<SignalDataTypeMap[T]>(keys)
+		}
+
+		const results: Record<string, SignalDataTypeMap[T] | undefined> = {}
+		for (const key of keys) {
+			results[key] = (await cache.get(key)) as SignalDataTypeMap[T] | undefined
+		}
+
+		return results
+	}
+
+	async function cacheMset(entries: Array<{ key: string; value: CacheValue }>): Promise<void> {
+		if (entries.length === 0) return
+
+		if (cache.mset) {
+			await cache.mset(entries)
+		} else {
+			for (const { key, value } of entries) {
+				await cache.set(key, value)
+			}
+		}
+	}
+
 	return {
 		async get(type, ids) {
-			return cacheMutex.runExclusive(async () => {
-				const data: { [_: string]: SignalDataTypeMap[typeof type] } = {}
-				const idsToFetch: string[] = []
+			const data: { [_: string]: SignalDataTypeMap[typeof type] } = {}
+			const idsToFetch: string[] = []
 
-				for (const id of ids) {
-					const item = (await cache.get<SignalDataTypeMap[typeof type]>(getUniqueId(type, id))) as any
-					if (typeof item !== 'undefined') {
+			const cacheResults = await cacheGet(type, ids)
+
+			for (const id of ids) {
+				const item = cacheResults[getUniqueId(type, id)]
+				if (item !== undefined) {
+					data[id] = item
+				} else {
+					idsToFetch.push(id)
+				}
+			}
+
+			if (idsToFetch.length) {
+				logger?.trace({ items: idsToFetch.length }, 'loading from store')
+				const fetched = await store.get(type, idsToFetch)
+
+				const toCache: Array<{ key: string; value: CacheValue }> = []
+				for (const id of idsToFetch) {
+					const item = fetched[id]
+					if (item) {
 						data[id] = item
-					} else {
-						idsToFetch.push(id)
+						toCache.push({ key: getUniqueId(type, id), value: item })
 					}
 				}
 
-				if (idsToFetch.length) {
-					logger?.trace({ items: idsToFetch.length }, 'loading from store')
-					const fetched = await store.get(type, idsToFetch)
-					for (const id of idsToFetch) {
-						const item = fetched[id]
-						if (item) {
-							data[id] = item
-							await cache.set(getUniqueId(type, id), item as SignalDataTypeMap[keyof SignalDataTypeMap])
-						}
-					}
-				}
+				await cacheMset(toCache)
+			}
 
-				return data
-			})
+			return data
 		},
 		async set(data) {
-			return cacheMutex.runExclusive(async () => {
-				let keys = 0
-				for (const type in data) {
-					for (const id in data[type as keyof SignalDataTypeMap]) {
-						await cache.set(getUniqueId(type, id), data[type as keyof SignalDataTypeMap]![id]!)
-						keys += 1
-					}
-				}
+			const allEntries: Array<{ key: string; value: CacheValue }> = []
 
-				logger?.trace({ keys }, 'updated cache')
-				await store.set(data)
-			})
+			for (const type in data) {
+				const typeData = data[type as keyof SignalDataTypeMap]
+				if (!typeData) continue
+
+				for (const [id, value] of Object.entries(typeData)) {
+					allEntries.push({ key: getUniqueId(type, id), value })
+				}
+			}
+
+			await cacheMset(allEntries)
+			logger?.trace({ keys: allEntries.length }, 'updated cache')
+			await store.set(data)
 		},
 		async clear() {
 			await cache.flushAll()
@@ -118,8 +154,8 @@ export const addTransactionCapability = (
 ): SignalKeyStoreWithTransaction => {
 	const txStorage = new AsyncLocalStorage<TransactionContext>()
 
-	// Queues for concurrency control (keyed by signal data type - bounded set)
-	const keyQueues = new Map<string, PQueue>()
+	// Mutexes for concurrency control (keyed by signal data type - bounded set)
+	const keyMutexes = new Map<string, Mutex>()
 
 	// Transaction mutexes with reference counting for cleanup
 	const txMutexes = new Map<string, Mutex>()
@@ -129,14 +165,14 @@ export const addTransactionCapability = (
 	const preKeyManager = new PreKeyManager(state, logger)
 
 	/**
-	 * Get or create a queue for a specific key type
+	 * Get or create a mutex for a specific key type
 	 */
-	function getQueue(key: string): PQueue {
-		if (!keyQueues.has(key)) {
-			keyQueues.set(key, new PQueue({ concurrency: 1 }))
+	function getKeyMutex(key: string): Mutex {
+		if (!keyMutexes.has(key)) {
+			keyMutexes.set(key, new Mutex())
 		}
 
-		return keyQueues.get(key)!
+		return keyMutexes.get(key)!
 	}
 
 	/**
@@ -252,7 +288,7 @@ export const addTransactionCapability = (
 			const ctx = txStorage.getStore()
 
 			if (!ctx) {
-				// No transaction - direct write with queue protection
+				// No transaction - direct write with mutex protection
 				const types = Object.keys(data)
 
 				// Process pre-keys with validation
@@ -263,10 +299,10 @@ export const addTransactionCapability = (
 					}
 				}
 
-				// Write all data in parallel
+				// Write all data in parallel (each type protected by its own mutex)
 				await Promise.all(
 					types.map(type =>
-						getQueue(type).add(async () => {
+						getKeyMutex(type).runExclusive(async () => {
 							const typeData = { [type]: data[type as keyof SignalDataTypeMap] } as SignalDataSet
 							await state.set(typeData)
 						})
