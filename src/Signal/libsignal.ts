@@ -30,9 +30,10 @@ export function makeLibSignalRepository(
 
 	const parsedKeys = auth.keys as SignalKeyStoreWithTransaction
 	const migratedSessionCache = new LRUCache<string, true>({
-		ttl: 3 * 24 * 60 * 60 * 1000, // 7 days
-		ttlAutopurge: true,
-		updateAgeOnGet: true
+		max: 1000,
+		ttl: 60 * 60 * 1000, // 1 hour
+		ttlAutopurge: false,
+		updateAgeOnGet: false,
 	})
 
 	const repository: SignalRepositoryWithLIDStore = {
