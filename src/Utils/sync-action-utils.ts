@@ -68,6 +68,7 @@ export const emitSyncActionResults = (ev: BaileysEventEmitter, results: SyncActi
 		if (result.event === 'contacts.upsert') {
 			ev.emit('contacts.upsert', result.data)
 		} else {
+			// @ts-ignore
 			ev.emit('lid-mapping.update', [result.data])
 		}
 	}
