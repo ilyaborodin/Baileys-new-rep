@@ -292,9 +292,7 @@ const processMessage = async (
 					if (data.lidPnMappings?.length) {
 						logger?.debug({ count: data.lidPnMappings.length }, 'processing LID-PN mappings from history sync')
 						// eslint-disable-next-line max-depth
-						for (const mapping of data.lidPnMappings) {
-							ev.emit('lid-mapping.update', mapping)
-						}
+						ev.emit('lid-mapping.update', data.lidPnMappings)
 					}
 
 					ev.emit('messaging-history.set', {

@@ -56,7 +56,7 @@ export const processContactAction = (
 	if (lidJid && isLidUser(lidJid) && idIsPn) {
 		results.push({
 			event: 'lid-mapping.update',
-			data: { lid: lidJid, pn: id }
+			data: [{ lid: lidJid, pn: id }]
 		})
 	}
 
@@ -68,7 +68,7 @@ export const emitSyncActionResults = (ev: BaileysEventEmitter, results: SyncActi
 		if (result.event === 'contacts.upsert') {
 			ev.emit('contacts.upsert', result.data)
 		} else {
-			ev.emit('lid-mapping.update', result.data)
+			ev.emit('lid-mapping.update', [result.data])
 		}
 	}
 }
