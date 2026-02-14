@@ -577,7 +577,7 @@ export const makeMessagesRecvSocket = (config: SocketConfig) => {
 
 			if (result.action === 'session_refreshed') {
 				// Re-issue tctoken after identity change if we previously issued one
-				// Matches WAWebSendTcTokenWhenDeviceIdentityChange (GysEGRAXCvh.js:37408)
+				// Matches WAWebSendTcTokenWhenDeviceIdentityChange
 				try {
 					const normalizedJid = jidNormalizedUser(from)
 					const tcJid = await resolveTcTokenJid(
@@ -590,7 +590,7 @@ export const makeMessagesRecvSocket = (config: SocketConfig) => {
 					// Only re-issue if we previously sent a token AND it's still valid
 					if (senderTs !== null && senderTs !== undefined && !isTcTokenExpired(senderTs)) {
 						logger.debug({ jid: normalizedJid, senderTimestamp: senderTs }, 'identity changed, re-issuing tctoken')
-						// Pass original senderTimestamp to match WA Web (GysEGRAXCvh.js:37434)
+						// Pass original senderTimestamp to match WA Web
 						getPrivacyTokens([normalizedJid], senderTs).catch(err => {
 							logger.debug(
 								{ jid: normalizedJid, err: err?.message },
@@ -986,7 +986,10 @@ export const makeMessagesRecvSocket = (config: SocketConfig) => {
 
 		// WA Web uses: senderLid ?? toLid(from) for the storage key
 		// The sender_lid attribute provides the LID directly when available
-		const senderLid = node.attrs.sender_lid ? jidNormalizedUser(node.attrs.sender_lid) : undefined
+		const senderLid =
+			node.attrs.sender_lid && isLidUser(jidNormalizedUser(node.attrs.sender_lid))
+				? jidNormalizedUser(node.attrs.sender_lid)
+				: undefined
 		const storageJid =
 			senderLid ??
 			(await resolveTcTokenJid(from, signalRepository.lidMapping.getLIDForPN.bind(signalRepository.lidMapping)))
@@ -1012,6 +1015,16 @@ export const makeMessagesRecvSocket = (config: SocketConfig) => {
 				// Preserve existing senderTimestamp to avoid racing with fire-and-forget
 				const existingData = await authState.keys.get('tctoken', [storageJid])
 				const existing = existingData[storageJid]
+
+				// Timestamp monotonicity guard — only store if incoming timestamp >= existing
+				// Matches WA Web handleIncomingTcToken
+				const existingTs = existing?.timestamp ? Number(existing.timestamp) : 0
+				const incomingTs = timestamp ? Number(timestamp) : 0
+				if (existingTs > 0 && incomingTs > 0 && existingTs > incomingTs) {
+					logger.debug({ storageJid, existingTs, incomingTs }, 'skipping tctoken store — existing timestamp is newer')
+					continue
+				}
+
 				await authState.keys.set({
 					tctoken: { [storageJid]: { ...existing, token: Buffer.from(content), timestamp } }
 				})
@@ -1019,37 +1032,6 @@ export const makeMessagesRecvSocket = (config: SocketConfig) => {
 					tcTokenKnownJids.add(storageJid)
 					scheduleTcTokenIndexSave()
 				}
-			}
-		}
-	}
-
-	/** Store tctoken(s) parsed from an IQ result, preserving existing senderTimestamp */
-	async function storeTcTokensFromResult(result: BinaryNode, fallbackJid: string) {
-		const tokensNode = getBinaryNodeChild(result, 'tokens')
-		if (!tokensNode) return
-
-		const getLID = signalRepository.lidMapping.getLIDForPN.bind(signalRepository.lidMapping)
-		const tokenNodes = getBinaryNodeChildren(tokensNode, 'token')
-		for (const tokenNode of tokenNodes) {
-			if (tokenNode.attrs.type !== 'trusted_contact' || !(tokenNode.content instanceof Uint8Array)) {
-				continue
-			}
-
-			const rawJid = jidNormalizedUser(tokenNode.attrs.jid || fallbackJid)
-			const storageJid = await resolveTcTokenJid(rawJid, getLID)
-			const existingTcData = await authState.keys.get('tctoken', [storageJid])
-			await authState.keys.set({
-				tctoken: {
-					[storageJid]: {
-						...existingTcData[storageJid],
-						token: Buffer.from(tokenNode.content),
-						timestamp: tokenNode.attrs.t
-					}
-				}
-			})
-			if (!tcTokenKnownJids.has(storageJid)) {
-				tcTokenKnownJids.add(storageJid)
-				scheduleTcTokenIndexSave()
 			}
 		}
 	}
@@ -1582,9 +1564,6 @@ export const makeMessagesRecvSocket = (config: SocketConfig) => {
 		await sendMessageAck(node)
 	}
 
-	/** tracks message IDs that have already been retried for error 463 to prevent loops */
-	const tcTokenRetrySet = new Set<string>()
-
 	const handleBadAck = async ({ attrs }: BinaryNode) => {
 		const key: WAMessageKey = { remoteJid: attrs.from, fromMe: true, id: attrs.id }
 
@@ -1605,56 +1584,15 @@ export const makeMessagesRecvSocket = (config: SocketConfig) => {
 		// error in acknowledgement,
 		// device could not display the message
 		if (attrs.error) {
-			// Error 463: missing privacy token (tctoken) — fetch token and retry once
-			if (
-				attrs.error === SERVER_ERROR_CODES.MissingTcToken &&
-				attrs.id &&
-				attrs.from &&
-				!isJidGroup(attrs.from) &&
-				!isJidStatusBroadcast(attrs.from) &&
-				!tcTokenRetrySet.has(attrs.id)
-			) {
-				tcTokenRetrySet.add(attrs.id)
-				// Prevent set from growing indefinitely
-				if (tcTokenRetrySet.size > 100) {
-					const first = tcTokenRetrySet.values().next().value
-					if (first) tcTokenRetrySet.delete(first)
-				}
-
-				try {
-					const normalizedJid = jidNormalizedUser(attrs.from)
-					logger.info({ jid: normalizedJid, msgId: attrs.id }, 'error 463: fetching tctoken and retrying')
-
-					// Issue our token / request contact's token
-					const result = await getPrivacyTokens([normalizedJid])
-
-					// Parse response for any token data
-					await storeTcTokensFromResult(result, normalizedJid)
-
-					// Try to get original message for retry
-					let msg: proto.IMessage | undefined
-					if (messageRetryManager) {
-						const cached = messageRetryManager.getRecentMessage(key.remoteJid!, attrs.id)
-						msg = cached?.message
-					}
-
-					if (!msg) {
-						msg = await getMessage(key)
-					}
-
-					if (msg) {
-						logger.debug({ msgId: attrs.id }, 'retrying message after tctoken fetch')
-						await relayMessage(key.remoteJid!, msg, {
-							messageId: key.id!,
-							useUserDevicesCache: false
-						})
-						return // retry sent — don't emit ERROR
-					}
-
-					logger.warn({ msgId: attrs.id }, 'error 463: message not found for retry')
-				} catch (err: any) {
-					logger.warn({ msgId: attrs.id, trace: err?.stack }, 'failed to retry after error 463')
-				}
+			if (attrs.error === SERVER_ERROR_CODES.MissingTcToken) {
+				// Error 463: missing privacy token (tctoken).
+				// WA Web does NOT retry — just marks as failed. The proactive
+				// fetch in relayMessage should prevent most 463 errors; if one
+				// still occurs, the token will be available for the next send.
+				logger.warn(
+					{ msgId: attrs.id, from: attrs.from },
+					'error 463: message rejected — missing tctoken (will be available for next send)'
+				)
 			} else if (attrs.error === SERVER_ERROR_CODES.SmaxInvalid) {
 				logger.warn(
 					{ msgId: attrs.id, from: attrs.from },
@@ -1838,7 +1776,7 @@ export const makeMessagesRecvSocket = (config: SocketConfig) => {
 		}
 
 		// Prune expired tctokens when coming online, at most once per 24 hours
-		// Matches WA Web's CLEAN_TC_TOKENS task (3JJWKHeu5-P.js:63980)
+		// Matches WA Web's CLEAN_TC_TOKENS task
 		// Note: don't gate on tcTokenKnownJids.size — the index may still be loading
 		if (isOnline) {
 			const now = Date.now()
