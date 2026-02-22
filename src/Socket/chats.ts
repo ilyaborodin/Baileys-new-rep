@@ -39,6 +39,7 @@ import {
 	extractSyncdPatches,
 	generateProfilePicture,
 	getHistoryMsg,
+	isAppStateSyncIrrecoverable,
 	newLTHashState,
 	processSyncAction
 } from '../Utils'
@@ -58,7 +59,6 @@ import {
 } from '../WABinary'
 import { USyncQuery, USyncUser } from '../WAUSync'
 import { makeSocket } from './socket.js'
-const MAX_SYNC_ATTEMPTS = 2
 
 export const makeChatsSocket = (config: SocketConfig) => {
 	const {
@@ -504,6 +504,9 @@ export const makeChatsSocket = (config: SocketConfig) => {
 				const collectionsToHandle = new Set<string>(collections)
 				// in case something goes wrong -- ensure we don't enter a loop that cannot be exited from
 				const attemptsMap: { [T in WAPatchName]?: number } = {}
+				// collections that failed and need a full snapshot on retry
+				// mirrors WA Web's ErrorFatal -> force snapshot behavior
+				const forceSnapshotCollections = new Set<WAPatchName>()
 				// keep executing till all collections are done
 				// sometimes a single patch request will not return all the patches (God knows why)
 				// so we fetch till they're all done (this is determined by the "has_more_patches" flag)
@@ -526,15 +529,20 @@ export const makeChatsSocket = (config: SocketConfig) => {
 
 						states[name] = state
 
-						logger.info(`resyncing ${name} from v${state.version}`)
+						const shouldForceSnapshot = forceSnapshotCollections.has(name)
+						if (shouldForceSnapshot) {
+							forceSnapshotCollections.delete(name)
+						}
+
+						logger.info(`resyncing ${name} from v${state.version}${shouldForceSnapshot ? ' (forcing snapshot)' : ''}`)
 
 						nodes.push({
 							tag: 'collection',
 							attrs: {
 								name,
 								version: state.version.toString(),
-								// return snapshot if being synced from scratch
-								return_snapshot: (!state.version).toString()
+								// return snapshot if syncing from scratch or forcing after a failed attempt
+								return_snapshot: (shouldForceSnapshot || !state.version).toString()
 							}
 						})
 					}
@@ -605,23 +613,21 @@ export const makeChatsSocket = (config: SocketConfig) => {
 								collectionsToHandle.delete(name)
 							}
 						} catch (error: any) {
-							// if retry attempts overshoot
-							// or key not found
-							const isIrrecoverableError =
-								attemptsMap[name]! >= MAX_SYNC_ATTEMPTS ||
-								error.output?.statusCode === 404 ||
-								error.name === 'TypeError'
-							logger.info(
-								{ name, error: error.stack },
-								`failed to sync state from version${isIrrecoverableError ? '' : ', removing and trying from scratch'}`
-							)
-							await authState.keys.set({ 'app-state-sync-version': { [name]: null } })
-							// increment number of retries
 							attemptsMap[name] = (attemptsMap[name] || 0) + 1
 
-							if (isIrrecoverableError) {
-								// stop retrying
+							const irrecoverable = isAppStateSyncIrrecoverable(error, attemptsMap[name])
+							logger.info(
+								{ name, error: error.stack },
+								`failed to sync state from v${states[name].version}` +
+									(irrecoverable ? ', giving up' : ', forcing snapshot retry')
+							)
+
+							if (irrecoverable) {
 								collectionsToHandle.delete(name)
+							} else {
+								// force a full snapshot on retry to recover from
+								// corrupted local state (e.g. LTHash MAC mismatch)
+								forceSnapshotCollections.add(name)
 							}
 						}
 					}

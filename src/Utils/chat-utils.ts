@@ -74,7 +74,7 @@ const to64BitNetworkOrder = (e: number) => {
 
 type Mac = { indexMac: Uint8Array; valueMac: Uint8Array; operation: proto.SyncdMutation.SyncdOperation }
 
-const makeLtHashGenerator = ({ indexValueMap, hash }: Pick<LTHashState, 'hash' | 'indexValueMap'>) => {
+export const makeLtHashGenerator = ({ indexValueMap, hash }: Pick<LTHashState, 'hash' | 'indexValueMap'>) => {
 	indexValueMap = { ...indexValueMap }
 	const addBuffs: Uint8Array[] = []
 	const subBuffs: Uint8Array[] = []
@@ -85,7 +85,10 @@ const makeLtHashGenerator = ({ indexValueMap, hash }: Pick<LTHashState, 'hash' |
 			const prevOp = indexValueMap[indexMacBase64]
 			if (operation === proto.SyncdMutation.SyncdOperation.REMOVE) {
 				if (!prevOp) {
-					throw new Boom('tried remove, but no previous op', { data: { indexMac, valueMac } })
+					// WA Web does not throw here — it logs a warning and skips the subtract.
+					// The missing REMOVE will cause an LTHash mismatch, which is handled
+					// by the MAC validation layer (snapshot recovery or retry).
+					return
 				}
 
 				// remove from index value mac, since this mutation is erased
@@ -135,6 +138,24 @@ export const ensureLTHashStateVersion = (state: LTHashState): LTHashState => {
 	}
 
 	return state
+}
+
+export const MAX_SYNC_ATTEMPTS = 2
+
+/**
+ * Matches WA Web's SyncdFatalError classification:
+ * XMPP 400/404/405/406 are fatal, TypeError indicates WASM crash.
+ */
+export const isAppStateSyncIrrecoverable = (error: any, attempts: number): boolean => {
+	const statusCode = error?.output?.statusCode
+	return (
+		attempts >= MAX_SYNC_ATTEMPTS ||
+		statusCode === 400 ||
+		statusCode === 404 ||
+		statusCode === 405 ||
+		statusCode === 406 ||
+		error?.name === 'TypeError'
+	)
 }
 
 export const encodeSyncdPatch = async (
@@ -411,7 +432,7 @@ export const decodeSyncdSnapshot = async (
 		const base64Key = Buffer.from(snapshot.keyId!.id!).toString('base64')
 		const keyEnc = await getAppStateSyncKey(base64Key)
 		if (!keyEnc) {
-			throw new Boom(`failed to find key "${base64Key}" to decode mutation`)
+			throw new Boom(`failed to find key "${base64Key}" to decode mutation`, { statusCode: 404 })
 		}
 
 		const result = mutationKeys(keyEnc.keyData!)
@@ -479,7 +500,7 @@ export const decodePatches = async (
 			const base64Key = Buffer.from(keyId!.id!).toString('base64')
 			const keyEnc = await getAppStateSyncKey(base64Key)
 			if (!keyEnc) {
-				throw new Boom(`failed to find key "${base64Key}" to decode mutation`)
+				throw new Boom(`failed to find key "${base64Key}" to decode mutation`, { statusCode: 404 })
 			}
 
 			const result = mutationKeys(keyEnc.keyData!)
