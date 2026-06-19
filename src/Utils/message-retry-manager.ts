@@ -3,7 +3,7 @@ import type { proto } from '../../WAProto/index.js'
 import type { ILogger } from './logger'
 
 /** Number of sent messages to cache in memory for handling retry receipts */
-const RECENT_MESSAGES_SIZE = 512
+const RECENT_MESSAGES_SIZE = 256
 
 const MESSAGE_KEY_SEPARATOR = '\u0000'
 
@@ -77,13 +77,15 @@ export class MessageRetryManager {
 	})
 	private messageKeyIndex = new Map<string, string>()
 	private sessionRecreateHistory = new LRUCache<string, number>({
+		max: 200,
 		ttl: RECREATE_SESSION_TIMEOUT * 2,
-		ttlAutopurge: true
+		ttlAutopurge: false
 	})
 	private retryCounters = new LRUCache<string, number>({
+		max: 100,
 		ttl: 15 * 60 * 1000,
-		ttlAutopurge: true,
-		updateAgeOnGet: true
+		ttlAutopurge: false,
+		updateAgeOnGet: false
 	}) // 15 minutes TTL
 	private baseKeys = new LRUCache<string, Uint8Array>({
 		max: 1024,

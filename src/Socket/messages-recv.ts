@@ -146,8 +146,9 @@ export const makeMessagesRecvSocket = (config: SocketConfig) => {
 	const msgRetryCache =
 		config.msgRetryCounterCache ||
 		new NodeCache<number>({
-			stdTTL: DEFAULT_CACHE_TTLS.MSG_RETRY, // 1 hour
-			useClones: false
+			stdTTL: DEFAULT_CACHE_TTLS.MSG_RETRY, // 15 minutes
+			useClones: false,
+			maxKeys: 200
 		})
 	const callOfferCache =
 		config.callOfferCache ||
